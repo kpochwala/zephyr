@@ -51,25 +51,291 @@ struct vl53l0x_data {
 	VL53L0X_RangingMeasurementData_t RangingMeasurementData;
 };
 
-static int vl53l0x_setup_single_shot(const struct device *dev)
+static int vl53l0x_perform_offset_calibration(const struct device *dev, const struct sensor_value *distance)
+{
+	int ret;
+	struct vl53l0x_data *drv_data = dev->data;
+
+	return ret;
+}
+
+static int vl53l0x_perform_xtalk_calibration(const struct device *dev, const struct sensor_value *distance)
+{
+	int ret;
+	struct vl53l0x_data *drv_data = dev->data;
+
+	return ret;
+}
+
+static int vl53l0x_setup_continous(const struct device* dev)
+{
+	int ret;
+	struct vl53l0x_data *drv_data = dev->data;
+
+	ret = VL53L0X_SetDeviceMode(&drv_data->vl53l0x,
+				    VL53L0X_DEVICEMODE_CONTINUOUS_RANGING);
+	if (ret) {
+		LOG_ERR("[%s] VL53L0X_SetDeviceMode CONTINOUS failed",
+			dev->name);
+		goto exit;
+	}
+
+exit:
+	return ret;
+}
+
+static int vl53l0x_setup_single(const struct device* dev)
+{
+	int ret;
+	struct vl53l0x_data *drv_data = dev->data;
+
+	ret = VL53L0X_SetDeviceMode(&drv_data->vl53l0x,
+				    VL53L0X_DEVICEMODE_SINGLE_RANGING);
+	if (ret) {
+		LOG_ERR("[%s] VL53L0X_SetDeviceMode CONTINOUS failed",
+			dev->name);
+		goto exit;
+	}
+
+exit:
+	return ret;
+}
+
+static int vl53l0x_setup_continous_timed(const struct device* dev, const struct sensor_value *delay)
+{
+	int ret;
+	struct vl53l0x_data *drv_data = dev->data;
+
+	return ret;
+}
+
+// example range profiles, check UM2039 p. 22 "Example API range profiles"
+enum range_profile
+{
+	DEFAULT_MODE = 0, // 30ms  time budget, max range 1200 mm
+	HIGH_ACCURACY,    // 200ms time budget, max range 1200 mm
+	LONG_RANGE,       // 33ms  time budget, max range 2000 mm
+	HIGH_SPEED        // 20ms  time budget, max range 1200 mm
+};
+
+static int vl53l0x_set_profile_values(const struct device* dev, float signal_rate_final_mcps, uint32_t sigma_final_range_mm, uint32_t timing_budget_ms)
+{
+	int ret;
+	struct vl53l0x_data *drv_data = dev->data;
+	
+	// api values are scaled, check UM2039 p. 22 "Example API range profiles"
+	uint32_t signal_rate_final_api = signal_rate_final_mcps * 65536;
+	uint32_t sigma_final_range_api = sigma_final_range_mm * 65536;
+	uint32_t timing_budget_api = timing_budget_ms * 1000;
+
+
+	// set limit values
+	ret = VL53L0X_SetLimitCheckValue(&drv_data->vl53l0x, VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE, signal_rate_final_api);
+	if(ret)
+	{
+		LOG_ERR("[%s] VL53L0X_SetLimitCheckValue SIGNAL_RATE_FINAL_RANGE failed",
+			dev->name);
+		goto exit;
+	}
+
+	ret = VL53L0X_SetLimitCheckValue(&drv_data->vl53l0x, VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE, sigma_final_range_api);
+	if(ret)
+	{
+		LOG_ERR("[%s] VL53L0X_SetLimitCheckValue SIGMA_FINAL_RANGE failed",
+			dev->name);
+		goto exit;
+	}
+
+	ret = VL53L0X_SetMeasurementTimingBudgetMicroSeconds(&drv_data->vl53l0x, timing_budget_api);
+	if(ret)
+	{
+		LOG_ERR("[%s] VL53L0_SetMeasurementTimingBudgetMicroSeconds failed",
+			dev->name);
+		goto exit;
+	}
+
+	// enable limits
+	ret = VL53L0X_SetLimitCheckEnable(&drv_data->vl53l0x, VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE, 1);
+	if(ret)
+	{
+		LOG_ERR("[%s] VL53L0X_SetLimitCheckEnable SIGNAL_RATE_FINAL_RANGE failed",
+			dev->name);
+		goto exit;
+	}
+	
+	ret = VL53L0X_SetLimitCheckEnable(&drv_data->vl53l0x, VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE, 1);
+	if(ret)
+	{
+		LOG_ERR("[%s] VL53L0X_SetLimitCheckEnable SIGMA_FINAL_RANGE failed",
+			dev->name);
+		goto exit;
+	}
+
+exit:
+	return ret;
+}
+
+// todo: set real default values
+static int vl53l0x_setup_range_profile_default(const struct device* dev)
+{
+	int ret;
+	
+	ret = vl53l0x_set_profile_values(dev, 0.25, 18, 30);
+	if(ret)
+	{
+		LOG_ERR("[%s] vl53l0x_set_profile_values failed",
+			dev->name);
+		goto exit;
+	}
+
+exit:
+	return ret;
+}
+
+// signal rate 0.25Mcps, sigma 18mm, timing budget 30ms
+static int vl53l0x_setup_range_profile_high_accuracy(const struct device* dev)
+{
+	int ret;
+	
+	ret = vl53l0x_set_profile_values(dev, 0.25, 18, 30);
+	if(ret)
+	{
+		LOG_ERR("[%s] vl53l0x_set_profile_values failed",
+			dev->name);
+		goto exit;
+	}
+
+exit:
+	return ret;
+}
+
+// signal rate 0.1Mcps, sigma 60mm, timing budget 33ms
+static int vl53l0x_setup_range_profile_long_range(const struct device* dev)
+{
+	int ret;
+	struct vl53l0x_data *drv_data = dev->data;
+
+	ret = vl53l0x_set_profile_values(dev, 0.25, 18, 30);
+	if(ret)
+	{
+		LOG_ERR("[%s] vl53l0x_set_profile_values failed",
+			dev->name);
+		goto exit;
+	}
+
+	// set VCSEL values
+	ret = VL53L0X_SetVcselPulsePeriod(&drv_data->vl53l0x, VL53L0X_VCSEL_PERIOD_PRE_RANGE, 18);
+	if(ret)
+	{
+		LOG_ERR("[%s] VL53L0X_SetVcselPulsePeriod VL53L0X_VCSEL_PERIOD_PRE_RANGE failed",
+			dev->name);
+		goto exit;
+	}
+
+	ret = VL53L0X_SetVcselPulsePeriod(&drv_data->vl53l0x, VL53L0X_VCSEL_PERIOD_FINAL_RANGE, 14);
+	if(ret)
+	{
+		LOG_ERR("[%s] VL53L0X_SetVcselPulsePeriod VL53L0X_VCSEL_PERIOD_FINAL_RANGE failed",
+			dev->name);
+		goto exit;
+	}
+
+exit:
+	return ret;
+}
+
+// signal rate 0.25Mcps, sigma 18mm, timing budget 30ms
+static int vl53l0x_setup_range_profile_high_speed(const struct device* dev)
+{
+	int ret;
+	
+	ret = vl53l0x_set_profile_values(dev, 0.25, 18, 30);
+	if(ret)
+	{
+		LOG_ERR("[%s] vl53l0x_set_profile_values failed",
+			dev->name);
+		goto exit;
+	}
+
+exit:
+	return ret;
+}
+
+// set up range profile based on enum range_profile
+static int vl53l0x_setup_range_profile(const struct device* dev, const enum range_profile profile)
+{
+	int ret;
+
+	if(dev == NULL)
+	{
+		// set ret to nosup?
+		LOG_ERR("[] vl53l0x_setup_range_profile, null device passed", NULL);
+		goto exit;
+	}
+
+	switch(profile)
+	{
+		case DEFAULT_MODE: 
+			ret = vl53l0x_setup_range_profile_default(dev);
+			if(ret)
+			{
+				LOG_ERR("[%s] vl53l0x_setup_range_profile_default failed",
+					dev->name);
+				goto exit;
+			}
+			break;
+		case HIGH_ACCURACY: 
+			ret = vl53l0x_setup_range_profile_high_accuracy(dev);
+			if(ret)
+			{
+				LOG_ERR("[%s] vl53l0x_setup_range_profile_high_accuracy failed",
+					dev->name);
+				goto exit;
+			}
+			break;
+		case LONG_RANGE: 
+			ret = vl53l0x_setup_range_profile_long_range(dev);
+			if(ret)
+			{
+				LOG_ERR("[%s] vl53l0x_setup_range_profile_long_range failed",
+					dev->name);
+				goto exit;
+			}
+			break;
+		case HIGH_SPEED: 
+			ret = vl53l0x_setup_range_profile_high_speed(dev);
+			if(ret)
+			{
+				LOG_ERR("[%s] vl53l0x_setup_range_profile_high_speed failed",
+					dev->name);
+				goto exit;
+			}
+			break;
+		default:
+			// set ret to nosup?
+			LOG_ERR("[%s] vl53l0x_setup_range_profile failed, unknown profile: %d",
+				dev->name, profile);
+			goto exit;
+			break;
+	}
+exit:
+	return ret;
+}
+
+// perform basic calibration (without crosstalk and offset)
+static int vl53l0x_perform_basic_calibration(const struct device* dev)
 {
 	struct vl53l0x_data *drv_data = dev->data;
 	int ret;
+
 	uint8_t VhvSettings;
 	uint8_t PhaseCal;
 	uint32_t refSpadCount;
 	uint8_t isApertureSpads;
 
-	ret = VL53L0X_StaticInit(&drv_data->vl53l0x);
-	if (ret) {
-		LOG_ERR("[%s] VL53L0X_StaticInit failed",
-			dev->name);
-		goto exit;
-	}
-
 	ret = VL53L0X_PerformRefCalibration(&drv_data->vl53l0x,
-					    &VhvSettings,
-					    &PhaseCal);
+					&VhvSettings,
+					&PhaseCal);
 	if (ret) {
 		LOG_ERR("[%s] VL53L0X_PerformRefCalibration failed",
 			dev->name);
@@ -85,73 +351,89 @@ static int vl53l0x_setup_single_shot(const struct device *dev)
 		goto exit;
 	}
 
-	ret = VL53L0X_SetDeviceMode(&drv_data->vl53l0x,
-				    VL53L0X_DEVICEMODE_SINGLE_RANGING);
+exit:
+	return ret;	
+}
+
+// device initialization UM2039 3.2.Fig 5
+static int vl53l0x_device_initialization(const struct device* dev)
+{
+	struct vl53l0x_data *drv_data = dev->data;
+	int ret;
+
+	ret = VL53L0X_DataInit(&drv_data->vl53l0x);
 	if (ret) {
-		LOG_ERR("[%s] VL53L0X_SetDeviceMode failed",
+		LOG_ERR("[%s] VL53L0X_DataInit failed, return error (%d)",
+			dev->name, ret);
+		goto exit;
+	}
+	
+	ret = VL53L0X_StaticInit(&drv_data->vl53l0x);
+	if (ret) {
+		LOG_ERR("[%s] VL53L0X_StaticInit failed, return error: (%d)",
+			dev->name, ret);
+		goto exit;
+	}
+
+
+exit:
+	return ret;
+}
+
+static int vl53l0x_setup_single_shot(const struct device *dev)
+{
+	struct vl53l0x_data *drv_data = dev->data;
+	int ret;
+	uint8_t VhvSettings;
+	uint8_t PhaseCal;
+	uint32_t refSpadCount;
+	uint8_t isApertureSpads;
+
+	ret = vl53l0x_device_initialization(dev);
+	if (ret) {
+		LOG_ERR("[%s] vl53l0x_device_initialization failed",
 			dev->name);
 		goto exit;
 	}
 
-	ret = VL53L0X_SetLimitCheckEnable(&drv_data->vl53l0x,
-					  VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE,
-					  1);
+	ret = vl53l0x_perform_basic_calibration(dev);
 	if (ret) {
-		LOG_ERR("[%s] VL53L0X_SetLimitCheckEnable sigma failed",
+		LOG_ERR("[%s] vl53l0x_device_initialization failed",
 			dev->name);
 		goto exit;
 	}
 
-	ret = VL53L0X_SetLimitCheckEnable(&drv_data->vl53l0x,
-					  VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE,
-					  1);
-	if (ret) {
-		LOG_ERR("[%s] VL53L0X_SetLimitCheckEnable signal rate failed",
+
+	#ifdef CONFIG_VL53L0X_CONTINOUS_RANGE
+
+	ret = vl53l0x_setup_continous(dev);
+		if (ret) {
+		LOG_ERR("[%s] vl53l0x_setup_continous failed",
 			dev->name);
 		goto exit;
 	}
 
-	ret = VL53L0X_SetLimitCheckValue(&drv_data->vl53l0x,
-					 VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE,
-					 VL53L0X_SETUP_SIGNAL_LIMIT);
+	#else
+	
+	ret = vl53l0x_setup_single(dev);
+		if (ret) {
+		LOG_ERR("[%s] vl53l0x_setup_single failed",
+			dev->name);
+		goto exit;
+	}
+	
+	#endif
 
+	ret = vl53l0x_setup_range_profile(dev, HIGH_SPEED);
 	if (ret) {
-		LOG_ERR("[%s] VL53L0X_SetLimitCheckValue signal rate failed",
+		LOG_ERR("[%s] vl53l0x_setup_range_profile failed",
 			dev->name);
 		goto exit;
 	}
 
-	ret = VL53L0X_SetLimitCheckValue(&drv_data->vl53l0x,
-					 VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE,
-					 VL53L0X_SETUP_SIGMA_LIMIT);
+	ret = VL53L0X_StartMeasurement(&drv_data->vl53l0x);
 	if (ret) {
-		LOG_ERR("[%s] VL53L0X_SetLimitCheckValue sigma failed",
-			dev->name);
-		goto exit;
-	}
-
-	ret = VL53L0X_SetMeasurementTimingBudgetMicroSeconds(&drv_data->vl53l0x,
-							     VL53L0X_SETUP_MAX_TIME_FOR_RANGING);
-	if (ret) {
-		LOG_ERR("[%s] VL53L0X_SetMeasurementTimingBudgetMicroSeconds failed",
-			dev->name);
-		goto exit;
-	}
-
-	ret = VL53L0X_SetVcselPulsePeriod(&drv_data->vl53l0x,
-					  VL53L0X_VCSEL_PERIOD_PRE_RANGE,
-					  VL53L0X_SETUP_PRE_RANGE_VCSEL_PERIOD);
-	if (ret) {
-		LOG_ERR("[%s] VL53L0X_SetVcselPulsePeriod pre range failed",
-			dev->name);
-		goto exit;
-	}
-
-	ret = VL53L0X_SetVcselPulsePeriod(&drv_data->vl53l0x,
-					  VL53L0X_VCSEL_PERIOD_FINAL_RANGE,
-					  VL53L0X_SETUP_FINAL_RANGE_VCSEL_PERIOD);
-	if (ret) {
-		LOG_ERR("[%s] VL53L0X_SetVcselPulsePeriod final range failed",
+		LOG_ERR("[%s] vl53l0x_setup_range_profile failed",
 			dev->name);
 		goto exit;
 	}
@@ -223,14 +505,6 @@ static int vl53l0x_start(const struct device *dev)
 		return -ENOTSUP;
 	}
 
-	/* sensor init */
-	ret = VL53L0X_DataInit(&drv_data->vl53l0x);
-	if (ret < 0) {
-		LOG_ERR("[%s] VL53L0X_DataInit return error (%d)",
-			dev->name, ret);
-		return -ENOTSUP;
-	}
-
 	ret = vl53l0x_setup_single_shot(dev);
 	if (ret < 0) {
 		return -ENOTSUP;
@@ -259,13 +533,21 @@ static int vl53l0x_sample_fetch(const struct device *dev,
 		}
 	}
 
+#ifdef CONFIG_VL53L0X_CONTINOUS_RANGE
+	ret = VL53L0X_GetRangingMeasurementData(&drv_data->vl53l0x,
+						      &drv_data->RangingMeasurementData);
+#else
 	ret = VL53L0X_PerformSingleRangingMeasurement(&drv_data->vl53l0x,
 						      &drv_data->RangingMeasurementData);
+#endif
+
 	if (ret < 0) {
 		LOG_ERR("[%s] Could not perform measurment (error=%d)",
 			dev->name, ret);
 		return -EINVAL;
 	}
+
+
 
 	return 0;
 }

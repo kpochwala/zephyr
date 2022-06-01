@@ -29,3 +29,9 @@ config VL53L0X_RECONFIGURE_ADDRESS
 	  value from a sensor, it is powered up and its I2C address is reconfigured
 	  from the manufacturer default (0x29) to the address specified in the
 	  device tree.
+
+config VL53L0X_CONTINOUS_RANGE
+	bool "Set up sensor for continous ranging"
+	depends on VL53L0X
+	help
+	  Set up sensor in continous range mode instead of single shot.
