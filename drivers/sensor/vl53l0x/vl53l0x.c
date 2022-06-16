@@ -19,6 +19,7 @@
 #include <zephyr/types.h>
 #include <zephyr/device.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/drivers/gpio.h>
 
 #include "vl53l0x_api.h"
 #include "vl53l0x_platform.h"
@@ -43,12 +44,14 @@ LOG_MODULE_REGISTER(VL53L0X, CONFIG_SENSOR_LOG_LEVEL);
 struct vl53l0x_config {
 	struct i2c_dt_spec i2c;
 	struct gpio_dt_spec xshut;
+	struct gpio_dt_spec gpio1;
 };
 
 struct vl53l0x_data {
 	bool started;
 	VL53L0X_Dev_t vl53l0x;
 	VL53L0X_RangingMeasurementData_t RangingMeasurementData;
+	VL53L0X_DeviceModes DeviceMode;
 };
 
 static int vl53l0x_perform_offset_calibration(const struct device *dev, const struct sensor_value *distance)
@@ -264,7 +267,7 @@ exit:
 // set up range profile based on enum range_profile
 static int vl53l0x_setup_range_profile(const struct device* dev, const enum range_profile profile)
 {
-	int ret;
+	int ret = 0;
 
 	if(dev == NULL)
 	{
@@ -312,7 +315,7 @@ static int vl53l0x_setup_range_profile(const struct device* dev, const enum rang
 			}
 			break;
 		default:
-			// set ret to nosup?
+			ret = -ENOTSUP;
 			LOG_ERR("[%s] vl53l0x_setup_range_profile failed, unknown profile: %d",
 				dev->name, profile);
 			goto exit;
@@ -375,19 +378,40 @@ static int vl53l0x_device_initialization(const struct device* dev)
 		goto exit;
 	}
 
+exit:
+	return ret;
+}
+
+// set gpio to be used as input
+static int vl53l0x_setup_gpio(const struct device* dev)
+{
+	int ret = 0;
+	const struct vl53l0x_config *const config = dev->config;
+	if(config->gpio1.port == NULL){
+		LOG_ERR("[%s] No or improper gpio1 specified in config",
+			dev->name);
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	gpio_flags_t flags = GPIO_INPUT | GPIO_PULL_UP;
+
+	ret = gpio_pin_configure(config->gpio1.port, config->gpio1.pin, flags);
+	if(ret){
+		LOG_ERR("[%s] gpio_pin_configure failed",
+			dev->name);
+		goto exit;
+	}
 
 exit:
 	return ret;
 }
 
-static int vl53l0x_setup_single_shot(const struct device *dev)
+
+static int vl53l0x_setup(const struct device *dev)
 {
 	struct vl53l0x_data *drv_data = dev->data;
 	int ret;
-	uint8_t VhvSettings;
-	uint8_t PhaseCal;
-	uint32_t refSpadCount;
-	uint8_t isApertureSpads;
 
 	ret = vl53l0x_device_initialization(dev);
 	if (ret) {
@@ -403,6 +427,31 @@ static int vl53l0x_setup_single_shot(const struct device *dev)
 		goto exit;
 	}
 
+	#ifdef CONFIG_VL53L0X_GPIO_IN_RANGE
+	ret = VL53L0X_SetGpioConfig(&drv_data->vl53l0x,
+								0,
+								drv_data->DeviceMode,
+								VL53L0X_GPIOFUNCTIONALITY_THRESHOLD_CROSSED_LOW,
+								VL53L0X_INTERRUPTPOLARITY_LOW
+								);
+		if (ret) {
+		LOG_ERR("[%s] vl53l0x_setup_continous failed",
+			dev->name);
+		goto exit;
+	}
+
+	ret = VL53L0X_SetInterruptThresholds(&drv_data->vl53l0x,
+								drv_data->DeviceMode,
+								CONFIG_VL53L0X_PROXIMITY_THRESHOLD,
+								10000
+								);
+		if (ret) {
+		LOG_ERR("[%s] vl53l0x_setup_continous failed",
+			dev->name);
+		goto exit;
+	}
+	#endif
+
 
 	#ifdef CONFIG_VL53L0X_CONTINOUS_RANGE
 
@@ -416,13 +465,20 @@ static int vl53l0x_setup_single_shot(const struct device *dev)
 	#else
 	
 	ret = vl53l0x_setup_single(dev);
-		if (ret) {
+	if (ret) {
 		LOG_ERR("[%s] vl53l0x_setup_single failed",
 			dev->name);
 		goto exit;
 	}
 	
 	#endif
+
+	ret = VL53L0X_GetDeviceMode(&drv_data->vl53l0x, &drv_data->DeviceMode);
+	if (ret) {
+		LOG_ERR("[%s] VL53L0X_GetDeviceMode failed",
+			dev->name);
+		goto exit;
+	}
 
 	ret = vl53l0x_setup_range_profile(dev, HIGH_SPEED);
 	if (ret) {
@@ -505,10 +561,15 @@ static int vl53l0x_start(const struct device *dev)
 		return -ENOTSUP;
 	}
 
-	ret = vl53l0x_setup_single_shot(dev);
+	ret = vl53l0x_setup(dev);
 	if (ret < 0) {
 		return -ENOTSUP;
 	}
+
+
+#ifdef CONFIG_VL53L0X_GPIO_IN_RANGE
+	ret = vl53l0x_setup_gpio(dev);
+#endif
 
 	drv_data->started = true;
 	LOG_DBG("[%s] Started", dev->name);
@@ -533,13 +594,40 @@ static int vl53l0x_sample_fetch(const struct device *dev,
 		}
 	}
 
-#ifdef CONFIG_VL53L0X_CONTINOUS_RANGE
-	ret = VL53L0X_GetRangingMeasurementData(&drv_data->vl53l0x,
-						      &drv_data->RangingMeasurementData);
-#else
-	ret = VL53L0X_PerformSingleRangingMeasurement(&drv_data->vl53l0x,
-						      &drv_data->RangingMeasurementData);
-#endif
+	bool should_read = true;
+	#ifdef CONFIG_VL53L0X_GPIO_IN_RANGE
+	const struct vl53l0x_config *const config = dev->config;
+	int gpio_value = gpio_pin_get(config->gpio1.port, config->gpio1.pin);
+	if(gpio_value < 0)
+	{
+		LOG_ERR("[%s] gpio_pin_get failed",
+			dev->name);
+		return gpio_value;
+	}
+	should_read = gpio_value;
+	#endif
+
+	if(should_read){
+	#ifdef CONFIG_VL53L0X_CONTINOUS_RANGE
+		ret = VL53L0X_GetRangingMeasurementData(&drv_data->vl53l0x,
+								&drv_data->RangingMeasurementData);
+	#else
+		ret = VL53L0X_PerformSingleRangingMeasurement(&drv_data->vl53l0x,
+								&drv_data->RangingMeasurementData);
+	#endif
+	#ifdef CONFIG_VL53L0X_GPIO_IN_RANGE
+	ret = VL53L0X_ClearInterruptMask(&drv_data->vl53l0x, 0);
+	if(ret)
+	{
+		LOG_ERR("[%s] VL53L0X_ClearInterruptMask failed",
+			dev->name);
+		return gpio_value;
+	}
+	#endif
+	}else{
+		drv_data->RangingMeasurementData.RangeMilliMeter = 9999;
+		drv_data->RangingMeasurementData.RangeFractionalPart = 0;
+	}
 
 	if (ret < 0) {
 		LOG_ERR("[%s] Could not perform measurment (error=%d)",
@@ -638,7 +726,8 @@ static int vl53l0x_init(const struct device *dev)
 #define VL53L0X_INIT(inst)						 \
 	static struct vl53l0x_config vl53l0x_##inst##_config = {	 \
 		.i2c = I2C_DT_SPEC_INST_GET(inst),			 \
-		.xshut = GPIO_DT_SPEC_INST_GET_OR(inst, xshut_gpios, {}) \
+		.xshut = GPIO_DT_SPEC_INST_GET_OR(inst, xshut_gpios, {}),\
+		.gpio1 = GPIO_DT_SPEC_INST_GET_OR(inst, gpio1_gpios, {}) \
 	};								 \
 									 \
 	static struct vl53l0x_data vl53l0x_##inst##_driver;		 \

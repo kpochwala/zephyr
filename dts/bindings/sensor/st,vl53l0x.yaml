@@ -11,3 +11,8 @@ properties:
     xshut-gpios:
       type: phandle-array
       required: false
+      description: "GPIO used to shut sensor down"
+    gpio1-gpios:
+      type: phandle-array
+      required: false
+      description: "GPIO used to check if sensor value is in range"

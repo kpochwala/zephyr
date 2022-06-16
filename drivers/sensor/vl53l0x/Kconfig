@@ -35,3 +35,11 @@ config VL53L0X_CONTINOUS_RANGE
 	depends on VL53L0X
 	help
 	  Set up sensor in continous range mode instead of single shot.
+
+config VL53L0X_GPIO_IN_RANGE
+	bool "Use sensor GPIO pin to notify host that something is in distance less than VL53L0X_PROXIMITY_THRESHOLD"
+	depends on VL53L0X_CONTINOUS_RANGE
+	help
+	  When enabled, polling for distance data will occur only if sensor sets its GPIO to active state.
+	  Especially useful when connecting multiple sensors to the host to shorten time needed to poll all sensors.
+	  Due to limitations as in UM2039 6.8. it depends on VL53L0X_CONTINOUS_RANGE.
