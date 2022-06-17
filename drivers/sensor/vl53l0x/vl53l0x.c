@@ -723,6 +723,35 @@ static int vl53l0x_init(const struct device *dev)
 	return 0;
 }
 
+int vl53l0x_extra_calibrate_xtalk(const struct device *dev, int distance_mm, uint32_t *xtalk_output){
+	struct vl53l0x_data *drv_data = dev->data;
+	VL53L0X_Error ret;
+	
+	ret = VL53L0X_PerformXTalkCalibration(&drv_data->vl53l0x, distance_mm, xtalk_output);
+	return ret;
+}
+int vl53l0x_extra_save_xtalk(const struct device *dev, uint32_t xtalk_data){
+	struct vl53l0x_data *drv_data = dev->data;
+	VL53L0X_Error ret;
+	
+	ret = VL53L0X_SetXTalkCompensationRateMegaCps(&drv_data->vl53l0x, xtalk_data);
+	return ret;
+}
+int vl53l0x_extra_calibrate_offset(const struct device *dev, int distance_mm, int32_t *offset_micrometer){
+	struct vl53l0x_data *drv_data = dev->data;
+	VL53L0X_Error ret;
+
+	ret = VL53L0X_PerformOffsetCalibration(&drv_data->vl53l0x, distance_mm, offset_micrometer);
+	return ret;
+}
+int vl53l0x_extra_save_offset(const struct device *dev, int32_t offset_micrometer){
+	struct vl53l0x_data *drv_data = dev->data;
+	VL53L0X_Error ret;
+
+	ret = VL53L0X_SetOffsetCalibrationDataMicroMeter(&drv_data->vl53l0x, offset_micrometer);
+	return ret;
+}
+
 #define VL53L0X_INIT(inst)						 \
 	static struct vl53l0x_config vl53l0x_##inst##_config = {	 \
 		.i2c = I2C_DT_SPEC_INST_GET(inst),			 \
