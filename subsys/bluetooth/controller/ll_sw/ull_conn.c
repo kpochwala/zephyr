@@ -648,20 +648,11 @@ uint32_t ll_length_req_send(uint16_t handle, uint16_t tx_octets,
 {
 	struct ll_conn *conn;
 
-#if defined(CONFIG_BT_CTLR_PARAM_CHECK)
-#if defined(CONFIG_BT_CTLR_PHY_CODED)
-	uint16_t tx_time_max =
-			PDU_DC_MAX_US(LL_LENGTH_OCTETS_TX_MAX, PHY_CODED);
-#else /* !CONFIG_BT_CTLR_PHY_CODED */
-	uint16_t tx_time_max =
-			PDU_DC_MAX_US(LL_LENGTH_OCTETS_TX_MAX, PHY_1M);
-#endif /* !CONFIG_BT_CTLR_PHY_CODED */
-
-	if ((tx_octets > LL_LENGTH_OCTETS_TX_MAX) ||
-	    (tx_time > tx_time_max)) {
+	if (IS_ENABLED(CONFIG_BT_CTLR_PARAM_CHECK) &&
+	    ((tx_octets > LL_LENGTH_OCTETS_TX_MAX) ||
+	     (tx_time > PDU_DC_PAYLOAD_TIME_MAX_CODED))) {
 		return BT_HCI_ERR_INVALID_PARAM;
 	}
-#endif /* CONFIG_BT_CTLR_PARAM_CHECK */
 
 	conn = ll_connected_get(handle);
 	if (!conn) {
@@ -674,6 +665,20 @@ uint32_t ll_length_req_send(uint16_t handle, uint16_t tx_octets,
 	     !(conn->llcp_feature.features_conn & BIT64(BT_LE_FEAT_BIT_DLE)))) {
 		return BT_HCI_ERR_UNSUPP_REMOTE_FEATURE;
 	}
+
+#if defined(CONFIG_BT_CTLR_PHY)
+#if defined(CONFIG_BT_CTLR_PHY_CODED)
+	const uint16_t tx_time_max =
+		PDU_DC_MAX_US(LL_LENGTH_OCTETS_TX_MAX, PHY_CODED);
+#else /* !CONFIG_BT_CTLR_PHY_CODED */
+	const uint16_t tx_time_max =
+		PDU_DC_MAX_US(LL_LENGTH_OCTETS_TX_MAX, PHY_1M);
+#endif /* !CONFIG_BT_CTLR_PHY_CODED */
+
+	if (tx_time > tx_time_max) {
+		tx_time = tx_time_max;
+	}
+#endif /* CONFIG_BT_CTLR_PHY */
 
 	if (conn->llcp_length.req != conn->llcp_length.ack) {
 		switch (conn->llcp_length.state) {
@@ -1393,12 +1398,12 @@ void ull_conn_done(struct node_rx_event_done *done)
 	if (conn->llcp_rx_hold && rx_hold_is_done(conn)) {
 		rx_hold_flush(conn);
 
-#if !defined(CONFIG_BT_CTLR_LOW_LAT_ULL)
-		/* if done events have separate mayfly, explicit trigger of
-		 * rx_demux mayfly is necessary.
+		/* For both CONFIG_BT_CTLR_LOW_LAT_ULL or when done events have
+		 * separate mayfly, explicitly trigger rx_demux mayfly. In the
+		 * later we could be here without any node rx or tx ack being
+		 * processed hence an explicit ll_rx_sched call is necessary.
 		 */
 		ll_rx_sched();
-#endif /* !CONFIG_BT_CTLR_LOW_LAT_ULL */
 	}
 #endif /* CONFIG_BT_CTLR_RX_ENQUEUE_HOLD */
 

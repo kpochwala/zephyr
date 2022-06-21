@@ -177,6 +177,8 @@ static int do_composite_observe_read_path_op(struct lwm2m_message *msg, uint16_t
 					     sys_slist_t *lwm2m_path_list,
 					     sys_slist_t *lwm2m_path_free_list);
 static void lwm2m_engine_free_list(sys_slist_t *path_list, sys_slist_t *free_list);
+static int do_composite_read_op_for_parsed_list(struct lwm2m_message *msg, uint16_t content_format,
+						sys_slist_t *path_list);
 
 /* for debugging: to print IP addresses */
 char *lwm2m_sprint_ip_addr(const struct sockaddr *addr)
@@ -289,9 +291,6 @@ static int init_block_ctx(const uint8_t *token, uint8_t tkl,
 	(*ctx)->timestamp = timestamp;
 	(*ctx)->expected = 0;
 	(*ctx)->last_block = false;
-#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
-	lwm2m_senml_json_context_init(&(*ctx)->senml_json_ctx);
-#endif
 	memset(&(*ctx)->opaque, 0, sizeof((*ctx)->opaque));
 
 	return 0;
@@ -915,7 +914,7 @@ static int engine_add_composite_observer(struct lwm2m_message *msg,
 		LOG_DBG("OBSERVER Composite DUPLICATE [%s]",
 			log_strdup(lwm2m_sprint_ip_addr(&msg->ctx->remote_addr)));
 
-		return 0;
+		return do_composite_read_op_for_parsed_list(msg, format, &lwm2m_path_list);
 	}
 
 	ret = engine_observe_attribute_list_get(&lwm2m_path_list, &attrs, msg->ctx->srv_obj_inst);
@@ -928,7 +927,7 @@ static int engine_add_composite_observer(struct lwm2m_message *msg,
 		return -ENOMEM;
 	}
 	engine_observe_node_init(obs, token, msg->ctx, tkl, format, attrs.pmax);
-	return 0;
+	return do_composite_read_op_for_parsed_list(msg, format, &lwm2m_path_list);
 }
 
 static void remove_observer_from_list(struct lwm2m_ctx *ctx, sys_snode_t *prev_node,
@@ -1002,7 +1001,8 @@ static int engine_remove_composite_observer(struct lwm2m_message *msg, const uin
 
 	LOG_DBG("observer '%s' removed", log_strdup(sprint_token(token, tkl)));
 
-	return 0;
+	return do_composite_read_op_for_parsed_list(msg, format, &lwm2m_path_list);
+
 }
 
 #if defined(CONFIG_LOG)
@@ -1292,9 +1292,21 @@ static struct lwm2m_message *find_msg(struct coap_pending *pending,
 				      struct coap_reply *reply)
 {
 	size_t i;
+	struct lwm2m_message *msg;
 
 	if (!pending && !reply) {
 		return NULL;
+	}
+
+	msg = lwm2m_get_ongoing_rd_msg();
+	if (msg) {
+		if (pending != NULL && msg->pending == pending) {
+			return msg;
+		}
+
+		if (reply != NULL && msg->reply == reply) {
+			return msg;
+		}
 	}
 
 	for (i = 0; i < CONFIG_LWM2M_ENGINE_MAX_MESSAGES; i++) {
@@ -1326,20 +1338,27 @@ struct lwm2m_message *lwm2m_get_message(struct lwm2m_ctx *client_ctx)
 	return NULL;
 }
 
+void lm2m_message_clear_allocations(struct lwm2m_message *msg)
+{
+	if (msg->pending) {
+		coap_pending_clear(msg->pending);
+		msg->pending = NULL;
+	}
+
+	if (msg->reply) {
+		/* make sure we want to clear the reply */
+		coap_reply_clear(msg->reply);
+		msg->reply = NULL;
+	}
+}
+
 void lwm2m_reset_message(struct lwm2m_message *msg, bool release)
 {
 	if (!msg) {
 		return;
 	}
 
-	if (msg->pending) {
-		coap_pending_clear(msg->pending);
-	}
-
-	if (msg->reply) {
-		/* make sure we want to clear the reply */
-		coap_reply_clear(msg->reply);
-	}
+	lm2m_message_clear_allocations(msg);
 
 	if (msg->ctx) {
 		sys_slist_find_and_remove(&msg->ctx->pending_sends, &msg->node);
@@ -1375,6 +1394,8 @@ int lwm2m_init_message(struct lwm2m_message *msg)
 		token = msg->token;
 	}
 
+	lm2m_message_clear_allocations(msg);
+
 	r = coap_packet_init(&msg->cpkt, msg->msg_data, sizeof(msg->msg_data),
 			     COAP_VERSION_1, msg->type, tokenlen, token,
 			     msg->code, msg->mid);
@@ -1390,7 +1411,7 @@ int lwm2m_init_message(struct lwm2m_message *msg)
 
 	msg->pending = coap_pending_next_unused(
 				msg->ctx->pendings,
-				CONFIG_LWM2M_ENGINE_MAX_PENDING);
+				ARRAY_SIZE(msg->ctx->pendings));
 	if (!msg->pending) {
 		LOG_ERR("Unable to find a free pending to track "
 			"retransmissions.");
@@ -1409,7 +1430,7 @@ int lwm2m_init_message(struct lwm2m_message *msg)
 	if (msg->reply_cb) {
 		msg->reply = coap_reply_next_unused(
 				msg->ctx->replies,
-				CONFIG_LWM2M_ENGINE_MAX_REPLIES);
+				ARRAY_SIZE(msg->ctx->replies));
 		if (!msg->reply) {
 			LOG_ERR("No resources for waiting for replies.");
 			r = -ENOMEM;
@@ -1800,7 +1821,12 @@ static int path_to_objs(const struct lwm2m_obj_path *path,
 	}
 
 	if (!r) {
-		LOG_ERR("resource %d not found", path->res_id);
+		if (LWM2M_HAS_PERM(of, BIT(LWM2M_FLAG_OPTIONAL))) {
+			LOG_DBG("resource %d not found", path->res_id);
+		} else {
+			LOG_ERR("resource %d not found", path->res_id);
+		}
+
 		return -ENOENT;
 	}
 
@@ -1924,9 +1950,8 @@ int lwm2m_engine_delete_obj_inst(const char *pathstr)
 	return 0;
 }
 
-
-int lwm2m_engine_set_res_data(const char *pathstr, void *data_ptr, uint16_t data_len,
-			      uint8_t data_flags)
+int lwm2m_engine_set_res_buf(const char *pathstr, void *buffer_ptr,
+				  uint16_t buffer_len, uint16_t data_len, uint8_t data_flags)
 {
 	struct lwm2m_obj_path path;
 	struct lwm2m_engine_res_inst *res_inst = NULL;
@@ -1955,12 +1980,18 @@ int lwm2m_engine_set_res_data(const char *pathstr, void *data_ptr, uint16_t data
 	}
 
 	/* assign data elements */
-	res_inst->data_ptr = data_ptr;
+	res_inst->data_ptr = buffer_ptr;
 	res_inst->data_len = data_len;
-	res_inst->max_data_len = data_len;
+	res_inst->max_data_len = buffer_len;
 	res_inst->data_flags = data_flags;
 
 	return ret;
+}
+
+int lwm2m_engine_set_res_data(const char *pathstr, void *data_ptr, uint16_t data_len,
+			      uint8_t data_flags)
+{
+	return lwm2m_engine_set_res_buf(pathstr, data_ptr, data_len, data_len, data_flags);
 }
 
 static int lwm2m_engine_set(const char *pathstr, void *value, uint16_t len)
@@ -2188,10 +2219,25 @@ int lwm2m_engine_set_objlnk(const char *pathstr, struct lwm2m_objlnk *value)
 	return lwm2m_engine_set(pathstr, value, sizeof(struct lwm2m_objlnk));
 }
 
+int lwm2m_engine_set_res_data_len(const char *pathstr, uint16_t data_len)
+{
+	int ret;
+	void *buffer_ptr;
+	uint16_t buffer_len;
+	uint16_t old_len;
+	uint8_t data_flags;
+
+	ret = lwm2m_engine_get_res_buf(pathstr, &buffer_ptr, &buffer_len, &old_len, &data_flags);
+	if (ret) {
+		return ret;
+	}
+	return lwm2m_engine_set_res_buf(pathstr, buffer_ptr, buffer_len, data_len, data_flags);
+}
+
 /* user data getter functions */
 
-int lwm2m_engine_get_res_data(const char *pathstr, void **data_ptr, uint16_t *data_len,
-			      uint8_t *data_flags)
+int lwm2m_engine_get_res_buf(const char *pathstr, void **buffer_ptr, uint16_t *buffer_len,
+				  uint16_t *data_len, uint8_t *data_flags)
 {
 	struct lwm2m_obj_path path;
 	struct lwm2m_engine_res_inst *res_inst = NULL;
@@ -2219,12 +2265,28 @@ int lwm2m_engine_get_res_data(const char *pathstr, void **data_ptr, uint16_t *da
 		return -ENOENT;
 	}
 
-	*data_ptr = res_inst->data_ptr;
-	*data_len = res_inst->data_len;
-	*data_flags = res_inst->data_flags;
+	if (buffer_ptr) {
+		*buffer_ptr = res_inst->data_ptr;
+	}
+	if (buffer_len) {
+		*buffer_len = res_inst->max_data_len;
+	}
+	if (data_len) {
+		*data_len = res_inst->data_len;
+	}
+	if (data_flags) {
+		*data_flags = res_inst->data_flags;
+	}
 
 	return 0;
 }
+
+int lwm2m_engine_get_res_data(const char *pathstr, void **data_ptr, uint16_t *data_len,
+			      uint8_t *data_flags)
+{
+	return lwm2m_engine_get_res_buf(pathstr, data_ptr, NULL, data_len, data_flags);
+}
+
 
 static int lwm2m_engine_get(const char *pathstr, void *buf, uint16_t buflen)
 {
@@ -3850,6 +3912,28 @@ static int do_composite_read_op(struct lwm2m_message *msg, uint16_t content_form
 	}
 }
 
+static int do_composite_read_op_for_parsed_list(struct lwm2m_message *msg, uint16_t content_format,
+						sys_slist_t *path_list)
+{
+	switch (content_format) {
+
+#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
+	case LWM2M_FORMAT_APP_SEML_JSON:
+		return do_composite_read_op_for_parsed_list_senml_json(msg, path_list);
+#endif
+
+#if defined(CONFIG_LWM2M_RW_SENML_CBOR_SUPPORT)
+	case LWM2M_FORMAT_APP_SENML_CBOR:
+		return do_composite_read_op_for_parsed_path_senml_cbor(msg, path_list);
+#endif
+
+	default:
+		LOG_ERR("Unsupported content-format: %u", content_format);
+		return -ENOMSG;
+
+	}
+}
+
 static int do_composite_observe_read_path_op(struct lwm2m_message *msg, uint16_t content_format,
 					     sys_slist_t *lwm2m_path_list,
 					     sys_slist_t *lwm2m_path_free_list)
@@ -4893,7 +4977,6 @@ static int handle_request(struct coap_packet *request,
 					if (r < 0) {
 						goto error;
 					}
-					r = do_composite_read_op(msg, accept);
 				}
 			} else {
 				if ((code & COAP_REQUEST_MASK) == COAP_METHOD_GET) {
@@ -5016,10 +5099,14 @@ static int lwm2m_response_promote_to_con(struct lwm2m_message *msg)
 	msg->cpkt.data[2] = msg->mid >> 8;
 	msg->cpkt.data[3] = (uint8_t) msg->mid;
 
+	if (msg->pending) {
+		coap_pending_clear(msg->pending);
+	}
+
 	/* Add the packet to the pending list. */
 	msg->pending = coap_pending_next_unused(
 				msg->ctx->pendings,
-				CONFIG_LWM2M_ENGINE_MAX_PENDING);
+				ARRAY_SIZE(msg->ctx->pendings));
 	if (!msg->pending) {
 		LOG_ERR("Unable to find a free pending to track "
 			"retransmissions.");
@@ -5058,11 +5145,12 @@ static void lwm2m_udp_receive(struct lwm2m_ctx *client_ctx,
 
 	tkl = coap_header_get_token(&response, token);
 	pending = coap_pending_received(&response, client_ctx->pendings,
-					CONFIG_LWM2M_ENGINE_MAX_PENDING);
+					ARRAY_SIZE(client_ctx->pendings));
 	if (pending && coap_header_get_type(&response) == COAP_TYPE_ACK) {
 		msg = find_msg(pending, NULL);
 		if (msg == NULL) {
 			LOG_DBG("Orphaned pending %p.", pending);
+			coap_pending_clear(pending);
 			return;
 		}
 
@@ -5089,7 +5177,7 @@ static void lwm2m_udp_receive(struct lwm2m_ctx *client_ctx,
 		log_strdup(lwm2m_sprint_ip_addr(from_addr)));
 	reply = coap_response_received(&response, from_addr,
 				       client_ctx->replies,
-				       CONFIG_LWM2M_ENGINE_MAX_REPLIES);
+				       ARRAY_SIZE(client_ctx->replies));
 	if (reply) {
 		msg = find_msg(NULL, reply);
 
@@ -5175,7 +5263,7 @@ static int32_t retransmit_request(struct lwm2m_ctx *client_ctx,
 	int i;
 
 	for (i = 0, p = client_ctx->pendings;
-	     i < CONFIG_LWM2M_ENGINE_MAX_PENDING; i++, p++) {
+	     i < ARRAY_SIZE(client_ctx->pendings); i++, p++) {
 		if (!p->timeout) {
 			continue;
 		}
@@ -5308,6 +5396,7 @@ static int generate_notify_message(struct lwm2m_ctx *ctx,
 		if (!path) {
 			LOG_ERR("Observation node not include path");
 			ret = -EINVAL;
+			goto cleanup;
 		}
 		/* copy path */
 		memcpy(&msg->path, path, sizeof(struct lwm2m_obj_path));
@@ -5333,11 +5422,6 @@ static int generate_notify_message(struct lwm2m_ctx *ctx,
 	}
 
 	msg->operation = LWM2M_OP_READ;
-
-	obs->resource_update = false;
-	obs->active_tx_operation = true;
-
-
 	msg->type = COAP_TYPE_CON;
 	msg->code = COAP_RESPONSE_CODE_CONTENT;
 	msg->mid = coap_next_id();
@@ -5379,6 +5463,8 @@ static int generate_notify_message(struct lwm2m_ctx *ctx,
 		goto cleanup;
 	}
 
+	obs->active_tx_operation = true;
+	obs->resource_update = false;
 	lwm2m_information_interface_send(msg);
 
 	LOG_DBG("NOTIFY MSG: SENT");
@@ -5533,9 +5619,10 @@ int lwm2m_engine_context_close(struct lwm2m_ctx *client_ctx)
 	}
 
 	coap_pendings_clear(client_ctx->pendings,
-			    CONFIG_LWM2M_ENGINE_MAX_PENDING);
+			    ARRAY_SIZE(client_ctx->pendings));
 	coap_replies_clear(client_ctx->replies,
-			   CONFIG_LWM2M_ENGINE_MAX_REPLIES);
+			   ARRAY_SIZE(client_ctx->replies));
+
 #if defined(CONFIG_LWM2M_QUEUE_MODE_ENABLED)
 	client_ctx->connection_suspended = false;
 	client_ctx->buffer_client_messages = true;
@@ -5791,11 +5878,16 @@ static int load_tls_credential(struct lwm2m_ctx *client_ctx, uint16_t res_id,
 	snprintk(pathstr, sizeof(pathstr), "0/%d/%u", client_ctx->sec_obj_inst,
 		 res_id);
 
-	ret = lwm2m_engine_get_res_data(pathstr, &cred, &cred_len, &cred_flags);
+	ret = lwm2m_engine_get_res_buf(pathstr, &cred, NULL, &cred_len, &cred_flags);
 	if (ret < 0) {
 		LOG_ERR("Unable to get resource data for '%s'",
 			log_strdup(pathstr));
 		return ret;
+	}
+
+	if (cred_len == 0) {
+		LOG_ERR("Credential data is empty");
+		return -EINVAL;
 	}
 
 	ret = tls_credential_add(client_ctx->tls_tag, type, cred, cred_len);
@@ -6071,7 +6163,7 @@ int lwm2m_engine_start(struct lwm2m_ctx *client_ctx)
 
 	/* get the server URL */
 	snprintk(pathstr, sizeof(pathstr), "0/%d/0", client_ctx->sec_obj_inst);
-	ret = lwm2m_engine_get_res_data(pathstr, (void **)&url, &url_len,
+	ret = lwm2m_engine_get_res_buf(pathstr, (void **)&url, NULL, &url_len,
 					&url_data_flags);
 	if (ret < 0) {
 		return ret;

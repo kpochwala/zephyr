@@ -381,6 +381,9 @@ if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
   if(NOT ${ZEPHYR_TOOLCHAIN_VARIANT} STREQUAL "xcc")
     zephyr_cc_option(-fno-defer-pop)
   endif()
+else()
+  # Clang produces false positive vla warnings
+  zephyr_cc_option(-Wno-vla)
 endif()
 
 zephyr_cc_option_ifdef(CONFIG_STACK_USAGE            -fstack-usage)
@@ -1823,6 +1826,8 @@ if(CONFIG_SOC_DEPRECATED_RELEASE)
       removed in version ${CONFIG_SOC_DEPRECATED_RELEASE}"
   )
 endif()
+
+include(modules/deprecation_warnings.cmake)
 
 # In CMake projects, 'CMAKE_BUILD_TYPE' usually determines the
 # optimization flag, but in Zephyr it is determined through

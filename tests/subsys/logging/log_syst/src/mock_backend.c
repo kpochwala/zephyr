@@ -6,8 +6,8 @@
 
 #include "mock_backend.h"
 #include <ztest.h>
-#include <logging/log_core.h>
-#include <logging/log_backend_std.h>
+#include <zephyr/logging/log_core.h>
+#include <zephyr/logging/log_backend_std.h>
 #include <stdlib.h>
 
 static uint32_t log_format_current = CONFIG_LOG_BACKEND_MOCK_OUTPUT_DEFAULT;
@@ -123,9 +123,9 @@ static void panic(struct log_backend const *const backend)
 }
 
 const struct log_backend_api mock_log_backend_api = {
-	.process = IS_ENABLED(CONFIG_LOG2) ? process : NULL,
+	.process = process,
 	.init = mock_init,
-	.format_set = IS_ENABLED(CONFIG_LOG1) ? NULL : format_set,
+	.format_set = format_set,
 	.panic = panic
 };
 
