@@ -29,6 +29,7 @@ LOG_MODULE_REGISTER(ICM42X70, CONFIG_SENSOR_LOG_LEVEL);
 /* Maximum bytes to read/write on ICM42X70 serial interface */
 #define ICM42X70_SERIAL_INTERFACE_MAX_READ  (1024 * 32)
 #define ICM42X70_SERIAL_INTERFACE_MAX_WRITE (1024 * 32)
+#define ICM42670L_WHOAMI_COMPAT_ID          0x63
 
 static inline int icm42x70_reg_read(const struct device *dev, uint8_t reg, uint8_t *buf,
 				    uint32_t size)
@@ -346,6 +347,7 @@ static int icm42x70_sensor_init(const struct device *dev)
 {
 	struct icm42x70_data *data = dev->data;
 	const struct icm42x70_config *config = dev->config;
+	bool whoami_ok;
 	int err = 0;
 
 	/* Initialize serial interface and device */
@@ -367,10 +369,22 @@ static int icm42x70_sensor_init(const struct device *dev)
 		return err;
 	}
 
-	if (data->chip_id != data->imu_whoami) {
+	whoami_ok = (data->chip_id == data->imu_whoami) ||
+		    ((data->chip_id == ICM42670L_WHOAMI_COMPAT_ID) &&
+		     ((data->imu_whoami == INV_ICM42670P_WHOAMI) ||
+		      (data->imu_whoami == INV_ICM42670S_WHOAMI)));
+
+	if (!whoami_ok) {
 		LOG_ERR("invalid WHO_AM_I value, was 0x%x but expected 0x%x for %s", data->chip_id,
 			data->imu_whoami, data->imu_name);
 		return -ENOTSUP;
+	}
+
+	if ((data->chip_id == ICM42670L_WHOAMI_COMPAT_ID) &&
+	    ((data->imu_whoami == INV_ICM42670P_WHOAMI) ||
+	     (data->imu_whoami == INV_ICM42670S_WHOAMI))) {
+		LOG_WRN("WHO_AM_I fallback accepted: got 0x%x for %s", data->chip_id,
+			data->imu_name);
 	}
 
 	LOG_DBG("\"%s\" %s OK", dev->name, data->imu_name);
